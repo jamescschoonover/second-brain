@@ -92,6 +92,15 @@ def on_this_day(all_entries, ref, who_key):
     return results
 
 
+def random_memory(all_entries, who_key):
+    """Return a random entry for this user as a fallback when OTD is empty."""
+    import random
+    candidates = [e for e in all_entries if e.get("who", "james") == who_key]
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
 def emo_badge(emo):
     color = EMO_COLOR.get(emo, "#555")
     return f'<span style="background:{color};color:#000;padding:1px 8px;border-radius:10px;font-size:0.7rem;font-weight:600;">{emo}</span>' if emo else ""
@@ -105,7 +114,7 @@ def get_gmail():
     return build("gmail", "v1", credentials=creds)
 
 
-def build_html(who_name, week_entries, otd, open_actions):
+def build_html(who_name, week_entries, otd, open_actions, random_entry=None):
     today = date.today()
     mon, sun = week_bounds(today)
     week_label = f"{mon.strftime('%b %-d')} – {sun.strftime('%b %-d, %Y')}"
@@ -218,6 +227,34 @@ def build_html(who_name, week_entries, otd, open_actions):
                       text-transform:uppercase;margin-bottom:14px;">✨ ON THIS DAY</div>
           {otd_cards}
         </div>"""
+    elif random_entry:
+        e    = random_entry
+        d    = parse_date(e.get("date", ""))
+        dstr = d.strftime("%B %-d, %Y") if d else ""
+        src  = SOURCE_LABEL.get(e.get("source", ""), "Note")
+        emo  = e.get("emotion", "")
+        summ = (e.get("summary") or "")[:160]
+        if len(e.get("summary") or "") > 160:
+            summ += "…"
+        otd_section = f"""
+        <div style="background:#12122a;border:1px solid rgba(241,196,15,0.25);
+                    border-radius:12px;padding:20px;margin-bottom:16px;">
+          <div style="color:#f1c40f;font-size:0.68rem;letter-spacing:2px;
+                      text-transform:uppercase;margin-bottom:14px;">🎲 FROM YOUR BRAIN</div>
+          <div style="background:#0e0e1e;border-left:3px solid #a78bfa;
+                      border-radius:0 8px 8px 0;padding:13px 15px;margin-bottom:10px;">
+            <div style="color:#a78bfa;font-size:0.68rem;letter-spacing:1px;
+                        text-transform:uppercase;margin-bottom:4px;">
+              Random Memory &nbsp;·&nbsp; {dstr}
+            </div>
+            <div style="color:#e0e0e0;font-weight:600;font-size:0.88rem;
+                        margin-bottom:5px;">{e.get('title','Untitled')}</div>
+            <div style="color:#888;font-size:0.72rem;margin-bottom:5px;">
+              {src} {emo_badge(emo)}
+            </div>
+            <div style="color:#b0b0c0;font-size:0.83rem;line-height:1.55;">{summ}</div>
+          </div>
+        </div>"""
 
     # ── Open Action Items ────────────────────────────────────────────────────
     action_section = ""
@@ -288,20 +325,23 @@ def build_html(who_name, week_entries, otd, open_actions):
 </html>"""
 
 
-def send_digest(who_name, email, week_entries, otd, open_actions, dry_run=False):
+def send_digest(who_name, email, week_entries, otd, open_actions, all_entries=None, who_key="james", dry_run=False):
     today = date.today()
     mon, sun = week_bounds(today)
+
+    rand_entry = random_memory(all_entries or [], who_key) if not otd else None
 
     if dry_run:
         print(f"\n─── {who_name} Digest ───")
         print(f"  Week: {mon} → {sun}")
         print(f"  This week: {len(week_entries)} entries")
         print(f"  On This Day: {list(otd.keys()) or 'none'}")
+        print(f"  Random memory fallback: {rand_entry.get('title','—') if rand_entry else 'n/a'}")
         print(f"  Open actions: {len(open_actions)}")
         print(f"  Would send to: {email}")
         return
 
-    html = build_html(who_name, week_entries, otd, open_actions)
+    html = build_html(who_name, week_entries, otd, open_actions, random_entry=rand_entry)
     svc  = get_gmail()
     msg  = MIMEMultipart("alternative")
     msg["Subject"] = f"📓 Your Week in the Second Brain — {today.strftime('%b %-d')}"
@@ -347,7 +387,8 @@ def main():
             key=lambda e: e.get("date", ""),
         )
         otd = on_this_day(all_entries, today, who_key)
-        send_digest(who_name, email, week_entries, otd, open_actions, dry_run=args.dry_run)
+        send_digest(who_name, email, week_entries, otd, open_actions,
+                    all_entries=all_entries, who_key=who_key, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
