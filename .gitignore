@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+entries/
+digests/
+index.json
+pending_actions.json
