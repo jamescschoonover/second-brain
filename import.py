@@ -49,7 +49,11 @@ HAIKU_OUTPUT_COST_PER_1K = 0.0008
 def load_index() -> dict:
     if INDEX_FILE.exists():
         try:
-            return json.loads(INDEX_FILE.read_text())
+            raw = json.loads(INDEX_FILE.read_text())
+            # Handle legacy flat-list format
+            if isinstance(raw, list):
+                return {"last_updated": "", "entry_count": len(raw), "entries": raw}
+            return raw
         except Exception:
             pass
     return {"last_updated": "", "entry_count": 0, "entries": []}

@@ -163,48 +163,78 @@ def get_web_content(url: str) -> tuple[str, str, list[str]]:
     return title.strip()[:120], full_text, auto_tags
 
 
+COBALT_URL = "http://localhost:9000/"
+COBALT_KEY = "55e3e996-0de8-42e1-ab7e-00df99c22a12"
+
+
 def get_social_content(url: str) -> tuple[str, str, list[str]]:
-    """Instagram, TikTok, Twitter/X — use updated yt-dlp with Edge cookies."""
-    import subprocess as _sp
+    """Instagram, TikTok, Twitter/X — cobalt download + Whisper transcription."""
+    import requests
+    import whisper
 
     platform = "social"
     for pat, name in [(r"instagram", "instagram"), (r"tiktok", "tiktok"),
-                      (r"twitter|x\.com", "twitter"), (r"threads", "threads")]:
+                      (r"twitter|x\.com", "twitter"), (r"threads", "threads"),
+                      (r"reddit\.com", "reddit")]:
         if re.search(pat, url):
             platform = name
             break
 
-    cmd = [
-        str(YTDLP_BIN),
-        "--write-auto-subs", "--skip-download",
-        "--sub-format", "vtt", "--sub-langs", "en",
-        "--cookies-from-browser", "edge",
-        "--quiet",
-        "-o", str(BASE_DIR / "raw" / "%(id)s.%(ext)s"),
-        "--print", "%(title)s|||%(uploader)s|||%(id)s",
-        url,
-    ]
+    # Ask cobalt for audio
+    resp = requests.post(
+        COBALT_URL,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Api-Key {COBALT_KEY}",
+        },
+        json={"url": url, "downloadMode": "audio", "audioFormat": "mp3"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
-    result = _sp.run(cmd, capture_output=True, text=True, timeout=60)
-    output = result.stdout.strip()
+    status = data.get("status")
+    if status == "error":
+        raise RuntimeError(f"Cobalt error: {data.get('error', {}).get('code', 'unknown')}")
 
-    title, uploader, video_id = "Untitled", "", ""
-    if "|||" in output:
-        parts = output.split("|||")
-        title = parts[0].strip() if parts[0] else url
-        uploader = parts[1].strip() if len(parts) > 1 else ""
-        video_id = parts[2].strip() if len(parts) > 2 else ""
+    # picker = multi-image post; grab first video item if present, else fail gracefully
+    if status == "picker":
+        items = data.get("picker", [])
+        video_items = [i for i in items if i.get("type") == "video"]
+        if not video_items:
+            return url[:120], f"[{platform.title()}]\n\n(Image post — no audio to transcribe)\nURL: {url}", [platform, "image", "social"]
+        audio_url = video_items[0]["url"]
+        filename = "social_audio.mp3"
+    else:
+        audio_url = data.get("url", "")
+        filename = data.get("filename", "social_audio.mp3")
 
-    # Look for VTT
-    transcript = ""
-    if video_id:
-        for f in (BASE_DIR / "raw").glob(f"{video_id}*.vtt"):
-            transcript = _parse_vtt(f.read_text())
-            f.unlink(missing_ok=True)
-            break
+    # Extract title from filename (cobalt names files as "Title - Uploader.mp3")
+    title = filename.rsplit(".", 1)[0]  # strip extension
+    if " - " in title:
+        parts = title.rsplit(" - ", 1)
+        title, uploader = parts[0].strip(), parts[1].strip()
+    else:
+        uploader = ""
+
+    # Download audio to temp file
+    audio_resp = requests.get(audio_url, timeout=120, stream=True)
+    audio_resp.raise_for_status()
+    tmp_audio = Path(tempfile.mktemp(suffix=".mp3"))
+    with open(tmp_audio, "wb") as f:
+        for chunk in audio_resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+    # Transcribe with Whisper turbo
+    print(f"  🎙️  Transcribing with Whisper ({tmp_audio.stat().st_size // 1024}KB)...")
+    model = whisper.load_model("turbo")
+    result = model.transcribe(str(tmp_audio), fp16=False)
+    transcript = result.get("text", "").strip()
+    tmp_audio.unlink(missing_ok=True)
 
     meta = f"{platform.title()} · {uploader}" if uploader else platform.title()
-    full_text = f"[{meta}]\n\n{transcript}" if transcript else f"[{meta}]\n\n(No transcript available)"
+    full_text = f"[{meta}]\n\n{transcript}" if transcript else f"[{meta}]\n\n(No speech detected)"
     auto_tags = [platform, "video", "social"]
     return title[:120], full_text, auto_tags
 
@@ -231,9 +261,8 @@ def clip(url: str, who: str = "james", extra_tags: list = None, note: str = "") 
             title, content, auto_tags = get_social_content(url)
         except Exception as e:
             print(f"  ⚠️  {platform} fetch failed: {e}")
-            print("  💡 Make sure you're logged into this platform in Edge browser first")
             title = url
-            content = f"[{platform} — extraction failed. Log in to Edge first]\nURL: {url}"
+            content = f"[{platform} — extraction failed]\nURL: {url}"
             auto_tags = ["social", platform.lower()]
     else:
         print("  🌐 Web article detected — extracting text...")
